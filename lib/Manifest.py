@@ -401,15 +401,13 @@ class Manifest(object):
         return
 
     def VerifySignature(self):
-        from . import IX_ROOT_CA_FILE, VERIFIER_HELPER, IX_CRL
+        from . import IX_ROOT_CA_FILE
         from . import SIGNATURE_FAILURE
 
         if self.Signature() is None:
             return not SIGNATURE_FAILURE
         # Probably need a way to ignore the signature
         else:
-            import subprocess
-            import tempfile
             from base64 import b64decode
             import OpenSSL.crypto as Crypto
             try:
@@ -423,43 +421,28 @@ class Manifest(object):
                 log.debug("VerifySignature:  Cannot find a required file")
                 return False
 
-            # First we create a store
+            # Trust store holding the update CA.  It is consumed below by
+            # X509StoreContext, which makes the CA a real trust anchor: a signing
+            # certificate must chain to it, and its validity dates are enforced.
+            #
+            # X509StoreFlags.CRL_CHECK is deliberately NOT set.  OpenSSL requires a
+            # CRL for every certificate in the chain when that flag is on, so
+            # setting it without a published, reachable CRL makes verification fail
+            # closed on every client -- a fleet-wide update outage.  Revocation is
+            # therefore knowingly not covered; a compromised signing key is handled
+            # by shipping a new image with a different trust set.  Do not set this
+            # flag again unless a CRL is live and verified fetchable at cut time.
+            # See the internal development record and #21.
             store = Crypto.X509Store()
-            store.set_flags(Crypto.X509StoreFlags.CRL_CHECK)
             # Load our root CA
             try:
                 with open(IX_ROOT_CA_FILE, "r") as f:
                     root_ca = Crypto.load_certificate(Crypto.FILETYPE_PEM, f.read())
                     store.add_cert(root_ca)
             except:
-                log.debug("VerifySignature:  Could not load iX root CA", exc_info=True)
+                log.debug("VerifySignature:  Could not load update root CA", exc_info=True)
                 return False
-                
-            # Now need to get the CRL
-            crl_file = tempfile.NamedTemporaryFile(suffix=".pem")
-            if crl_file is None:
-                log.debug("Could not create CRL, ignoring for now")
-            else:
-                try:
-                    if not self._config.TryGetNetworkFile(
-                            url=IX_CRL,
-                            pathname=crl_file.name,
-                            reason="FetchCRL"
-                    ):
-                        # TGNF will raise an exception in most cases.
-                        raise Exception("Could not get CRL file")
-                except:
-                    log.error("Could not get CRL file %s" % IX_CRL)
-                    crl_file.close()
-                    crl_file = None
 
-            if crl_file:
-                try:
-                    crl = Crypto.load_crl(Crypto.FILETYPE_PEM, crl_file.read())
-                    store.add_crl(crl)
-                except:
-                    log.debug("Could not load CRL, ignoring for now", exc_info=True)
-                
             # Now load the certificate files
             try:
                 with open(cert_file, "r") as f:
@@ -467,7 +450,7 @@ class Manifest(object):
                     certs = re.findall(regexp, f.read(), re.DOTALL)
             except:
                 log.error("Could not load certificates", exc_info=True)
-                return false
+                return False
                     
             # Almost done:  we need the signature as binary data
             try:
@@ -484,12 +467,45 @@ class Manifest(object):
             for cert in certs:
                 try:
                     test_cert = Crypto.load_certificate(Crypto.FILETYPE_PEM, cert)
-                    Crypto.verify(test_cert, signature, canonical, "sha256")
-                    verified = True
-                    break
                 except:
-                    # For now, just ignore
-                    pass
+                    log.debug("VerifySignature:  Could not load candidate certificate",
+                              exc_info=True)
+                    continue
+
+                # Chain and validity check against the update CA.  This is what
+                # makes the CA load-bearing: a signing certificate that does not
+                # chain to it, or that is outside its notBefore/notAfter window, is
+                # rejected here -- before its signature is given any weight.
+                try:
+                    Crypto.X509StoreContext(store, test_cert).verify_certificate()
+                except Exception as e:
+                    # Kept distinct from a signature failure below: operators need
+                    # to be able to tell "wrong/expired certificate" apart from
+                    # "certificate fine, signature bad" from the log alone.
+                    log.debug("VerifySignature:  Certificate does not chain to the "
+                              "update CA, or is outside its validity period: %s" % e)
+                    continue
+
+                try:
+                    if hasattr(Crypto, "verify"):
+                        Crypto.verify(test_cert, signature, canonical, "sha256")
+                    else:
+                        from cryptography.hazmat.primitives import hashes
+                        from cryptography.hazmat.primitives.asymmetric import padding
+
+                        test_cert.to_cryptography().public_key().verify(
+                            signature,
+                            canonical.encode("utf-8"),
+                            padding.PKCS1v15(),
+                            hashes.SHA256(),
+                        )
+                except:
+                    log.debug("VerifySignature:  Signature does not verify against "
+                              "candidate certificate", exc_info=True)
+                    continue
+
+                verified = True
+                break
 
             return verified
         return False
@@ -524,7 +540,18 @@ class Manifest(object):
             tstr = MakeString(temp)
 
             # Sign it.
-            signed_value = base64(Crypto.sign(key, tstr, "sha256"))
+            if hasattr(Crypto, "sign"):
+                signature = Crypto.sign(key, tstr, "sha256")
+            else:
+                from cryptography.hazmat.primitives import hashes
+                from cryptography.hazmat.primitives.asymmetric import padding
+
+                signature = key.to_cryptography_key().sign(
+                    tstr.encode("utf-8"),
+                    padding.PKCS1v15(),
+                    hashes.SHA256(),
+                )
+            signed_value = base64(signature).decode("ascii")
 
             # And now set the signature
             self._dict[SIGNATURE_KEY] = signed_value
