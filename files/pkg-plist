@@ -10,6 +10,8 @@ usr/local/lib/freenasOS/PackageFile.py
 usr/local/lib/freenasOS/Train.py
 usr/local/lib/freenasOS/Update.py
 usr/local/lib/freenasOS/__init__.py
-usr/local/share/certs/iX-CA.pem
-usr/local/share/certs/Nightlies.pem
-usr/local/share/certs/Production.pem
+usr/local/share/certs/FreeCORE-15.0-Nightlies.pem
+usr/local/share/certs/FreeCORE-15.0-STABLE.pem
+usr/local/share/certs/FreeCORE-Nightlies.pem
+usr/local/share/certs/FreeCORE-Production.pem
+usr/local/share/certs/freecore-update-ca.pem
