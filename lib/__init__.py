@@ -14,17 +14,22 @@ import subprocess
 # platform-specific stuff.
 
 # Sef likes this line a lot.
-_os_type = "TrueNAS"
-UPDATE_SERVER = "https://update.ixsystems.com/" + _os_type
-MASTER_UPDATE_SERVER = "https://update-master.ixsystems.com/" + _os_type
+_os_type = "FreeCORE"
+UPDATE_SERVER = "https://updates.freecore.org/" + _os_type
+MASTER_UPDATE_SERVER = UPDATE_SERVER
 
 # For signature verification
-IX_CRL = "https://update-master.ixsystems.com/updates/ix_crl.pem"
+# No CRL constant on purpose.  Manifest.VerifySignature() verifies the signing
+# certificate against the update CA for chain and expiry, but deliberately does
+# not enable X509StoreFlags.CRL_CHECK -- see the comment there and
+# the internal development record/#21.  Re-adding a CRL URL is only half the job: the flag,
+# the published CRL and its periodic regeneration on the signer have to land
+# together, or clients fail closed.
 DEFAULT_CA_FILE = "/usr/local/share/certs/ca-root-nss.crt"
-IX_ROOT_CA_FILE = "/usr/local/share/certs/iX-CA.pem"
+IX_ROOT_CA_FILE = "/usr/local/share/certs/freecore-update-ca.pem"
 UPDATE_CERT_DIR = "/usr/local/share/certs"
-UPDATE_CERT_PRODUCTION = UPDATE_CERT_DIR + "/Production.pem"
-UPDATE_CERT_NIGHTLIES = UPDATE_CERT_DIR + "/Nightlies.pem"
+UPDATE_CERT_PRODUCTION = UPDATE_CERT_DIR + "/FreeCORE-Production.pem"
+UPDATE_CERT_NIGHTLIES = UPDATE_CERT_DIR + "/FreeCORE-Nightlies.pem"
 VERIFIER_HELPER = "/usr/local/libexec/verify_signature"
 SIGNATURE_FAILURE = True
 
