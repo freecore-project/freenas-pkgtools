@@ -27,7 +27,7 @@ import freenasOS.Installer as Installer
 from freenasOS.Exceptions import (
     UpdateIncompleteCacheException, UpdateInvalidCacheException, UpdateBusyCacheException,
     UpdateBootEnvironmentException, UpdateNetworkException, UpdatePackageException, UpdateSnapshotException,
-    ManifestInvalidSignature, UpdateManifestNotFound, UpdateInsufficientSpace,
+    ManifestInvalidSignature, UpdateManifestNotFound, UpdateInsufficientSpace, UpdateNetworkFileNotFoundException,
     InvalidBootEnvironmentNameException, UpdateBadFrozenFile,
 )
 
@@ -238,8 +238,12 @@ def StartServices(svc_list):
     return
 
 
-# Used by the clone functions below
-beadm = "/usr/local/sbin/beadm"
+# Used by the clone functions below.
+# beadm was dropped from the FB15 build (bectl has been in FreeBSD base since
+# 12.0); every boot-environment operation now shells out to bectl. The beadm:keep
+# / beadm:nickname ZFS user-properties are still read via libzfs below -- they are
+# plain zfs user props, independent of the binary. (the internal development record)
+bectl = "/sbin/bectl"
 dsinit = "/usr/local/sbin/dsinit"
 all_pools = subprocess.run(
     ['zpool', 'list', '-H', '-o', 'name'], capture_output=True, text=True
@@ -432,10 +436,10 @@ def PruneClones(cb=None, required=0):
 def ListClones():
     # Return a list of boot-environment clones.
     # The outer loop is just a simple wrapper for
-    # "beadm list -H"; it then gets a set of properties
+    # "bectl list -H"; it then gets a set of properties
     # for each BE.
     # Because of that, it can't use RunCommand
-    cmd = [beadm, "list", "-H"]
+    cmd = [bectl, "list", "-H"]
     rv = []
     if debug:
         print(cmd, file=sys.stderr)
@@ -458,12 +462,13 @@ def ListClones():
 
     for line in stdout.decode('utf8').strip('\n').split('\n'):
         fields = line.split('\t')
-        name = fields[0]
-        if len(fields) > 5 and fields[5] != "-":
-            name = fields[5]
+        # bectl list -H emits 5 tab-separated fields (name, active, mountpoint,
+        # space, created) and has no nickname column -- beadm exposed one at
+        # field[5]. The friendly name now comes from the beadm:nickname zfs
+        # user-property, read via libzfs below; default it to the real BE name.
         tdict = {
             'realname': fields[0],
-            'name': name,
+            'name': fields[0],
             'active': fields[1],
             'mountpoint': fields[2],
             'space': fields[3],
@@ -485,6 +490,17 @@ def ListClones():
                         tdict["keep"] = True
                     elif kstr == "False":
                         tdict["keep"] = False
+                except KeyError:
+                    pass
+
+                # beadm list surfaced the friendly nickname as a 6th column;
+                # bectl has no such column, so read the beadm:nickname
+                # user-property directly to keep FindClone()/the WebUI matching
+                # on nicknames exactly as before.
+                try:
+                    nick = ds.properties["beadm:nickname"].value
+                    if nick and nick != "-":
+                        tdict["name"] = nick
                 except KeyError:
                     pass
 
@@ -641,7 +657,7 @@ def CreateClone(name, bename=None, rename=None):
         if os.path.exists(dsinit) and not RunCommand(dsinit, ["--lock"]):
             return False
 
-        rv = RunCommand(beadm, args)
+        rv = RunCommand(bectl, args)
         if rv is False:
             return False
     finally:
@@ -653,23 +669,23 @@ def CreateClone(name, bename=None, rename=None):
         # Now we want to reame the root environment, which is rename, to
         # the new name.
         args = ["rename", rename, name]
-        rv = RunCommand(beadm, args)
+        rv = RunCommand(bectl, args)
         if rv is False:
             # We failed.  Clean up the temp one
             args = ["destroy", "-F", temp_name]
-            RunCommand(beadm, args)
+            RunCommand(bectl, args)
             return False
         # Root has been renamed, so let's rename the temporary one
         args = ["rename", temp_name, rename]
-        rv = RunCommand(beadm, args)
+        rv = RunCommand(bectl, args)
         if rv is False:
             # We failed here.  How annoying.
             # So let's delete the newlyp-created BE
             # and rename root
             args = ["destroy", "-F", rename]
-            RunCommand(beadm, args)
+            RunCommand(bectl, args)
             args = ["rename", name, rename]
-            RunCommand(beadm, args)
+            RunCommand(bectl, args)
             return False
 
     return True
@@ -683,7 +699,7 @@ def RenameClone(oldname, newname):
     _CheckBEName(newname)
     
     args = ["rename", oldname, newname]
-    rv = RunCommand(beadm, args)
+    rv = RunCommand(bectl, args)
     if rv is False:
         return False
     return True
@@ -705,7 +721,7 @@ def MountClone(name, mountpoint=None):
     if mount_point is None:
         return None
     args = ["mount", name, mount_point]
-    rv = RunCommand(beadm, args)
+    rv = RunCommand(bectl, args)
     if rv is False:
         try:
             os.rmdir(mount_point)
@@ -734,7 +750,7 @@ def MountClone(name, mountpoint=None):
 def ActivateClone(name):
     # Set the clone to be active for the next boot
     args = ["activate", name]
-    return RunCommand(beadm, args)
+    return RunCommand(bectl, args)
 
 
 def UnmountClone(name, mount_point=None):
@@ -748,10 +764,10 @@ def UnmountClone(name, mount_point=None):
             args = ["-f", mount_point + dir]
             RunCommand(cmd, args)
 
-    # Now we ask beadm to unmount it.
+    # Now we ask bectl to unmount it.
     args = ["unmount", "-f", name]
 
-    if RunCommand(beadm, args) is False:
+    if RunCommand(bectl, args) is False:
         return False
 
     if mount_point is not None:
@@ -775,7 +791,7 @@ def DeleteClone(name):
         return False
     
     args = ["destroy", "-F", clone["realname"]]
-    rv = RunCommand(beadm, args)
+    rv = RunCommand(bectl, args)
     if rv is False:
         return rv
     
@@ -912,6 +928,9 @@ def CheckForUpdates(handler=None, train=None, cache_dir=None, diff_handler=None)
     else:
         try:
             new_manifest = conf.FindLatestManifest(train=train, require_signature=True)
+        except UpdateNetworkFileNotFoundException as e:
+            log.debug("Could not load latest manifest due to %s" % str(e))
+            raise e
         except UpdateNetworkException as e:
             log.error("Could not load latest manifest due to %s" % str(e))
             raise e
