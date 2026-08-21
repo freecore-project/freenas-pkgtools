@@ -8,9 +8,7 @@ import tempfile
 import time
 import socket
 import ssl
-import six
-
-import six.moves.configparser as configparser
+import configparser
 
 from http.client import REQUESTED_RANGE_NOT_SATISFIABLE as HTTP_RANGE
 from http.client import NOT_FOUND as HTTP_NOT_FOUND
@@ -650,21 +648,26 @@ class Configuration(object):
             for url in file_url:
                 url_exc = None
                 try:
+                    # Header prefix follows the product, the same way
+                    # AVATAR_VERSION above is built from Avatar(). These go out
+                    # on every update request, so a hardcoded vendor name here
+                    # is an identity the box asserts on the wire.
+                    hdr = "X-%s-" % Avatar()
                     header_dict = {
-                        "X-iXSystems-Project" : Avatar(),
-                        "X-iXSystems-Version" : current_sequence,
+                        hdr + "Project" : Avatar(),
+                        hdr + "Version" : current_sequence,
                         "User-Agent" : "%s=%s" % (AVATAR_VERSION, current_version)
                     }
                     if current_version:
-                        header_dict["X-iXSystems-Version-Name"] = current_version
+                        header_dict[hdr + "Version-Name"] = current_version
                     if current_train:
-                        header_dict["X-iXSystems-Train"] = current_train
+                        header_dict[hdr + "Train"] = current_train
                     if host_id:
-                        header_dict["X-iXSystems-HostID"] = host_id
+                        header_dict[hdr + "HostID"] = host_id
                     if reason:
-                        header_dict["X-iXSystems-Reason"] = reason
+                        header_dict[hdr + "Reason"] = reason
                     if license_data:
-                        header_dict["X-iXSystems-License"] = license_data
+                        header_dict[hdr + "License"] = license_data
 
                     # Allow restarting
                     if intr_ok:
@@ -683,7 +686,7 @@ class Configuration(object):
                     elif error.response.status_code == HTTP_NOT_FOUND.value:
                         # The requested file is not found on this server.
                         url_exc = Exceptions.UpdateNetworkFileNotFoundException("Requested file %s not found" % (file if file else url))
-                        log.error("Error 404: %s" % str(url_exc))
+                        log.debug("Error 404: %s" % str(url_exc))
                     else:
                         log.error("Got http error %s" % str(error))
                         url_exc = Exceptions.UpdateNetworkServerException("Unable to load from url %s: %d" % (url, error.response.status_code))
@@ -706,7 +709,10 @@ class Configuration(object):
                     furl = None
                 if retval:
                     retval.close()
-                log.error("Unable to load %s: %s", file_url, str(url_exc))
+                if isinstance(url_exc, Exceptions.UpdateNetworkFileNotFoundException):
+                    log.debug("Unable to load %s: %s", file_url, str(url_exc))
+                else:
+                    log.error("Unable to load %s: %s", file_url, str(url_exc))
                 raise url_exc
 
             # This _shouldn't_ be doable, but I'm checking just in case.
@@ -801,7 +807,9 @@ class Configuration(object):
             self._trains[temp.Name()] = temp
         if updatecheck:
             for train in self._trains:
-                new_man = self.FindLatestManifest(train.Name())
+                new_man = self.FindLatestManifest(
+                    train.Name(), require_signature=True,
+                )
                 if new_man:
                     if new_man.Sequence() != train.LastSequence():
                         # We have an update
@@ -897,10 +905,7 @@ class Configuration(object):
                 except:
                     self._upd_conf_mtime = mtime
                 cfp = configparser.ConfigParser()
-                if six.PY2:
-                    cfp.readfp(f)
-                elif six.PY3:
-                    cfp.read_file(f)
+                cfp.read_file(f)
         except:
             # If we don't have an update configuration file,
             # we need to use the defaults, no matter what
@@ -1084,7 +1089,7 @@ class Configuration(object):
                                           reason="GetManifest")
         return file_ref
 
-    def FindLatestManifest(self, train=None, require_signature=False):
+    def FindLatestManifest(self, train=None, require_signature=True):
         # Gets <UPDATE_SERVER>/<train>/LATEST
         # Returns a manifest, or None.
         rv = None

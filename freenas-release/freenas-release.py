@@ -5,6 +5,7 @@ import getopt
 import stat
 import fcntl
 import shutil
+import functools
 
 sys.path.append("/usr/local/lib")
 
@@ -203,6 +204,16 @@ def LockArchive(archive, reason, wait = False):
     lock_file = Locker(wait = wait)
     is_locked = True
     return lock_file
+
+
+def OpenWithMode(path, flags, mode, fdopen_mode):
+    fd = os.open(path, flags, mode)
+    try:
+        return os.fdopen(fd, fdopen_mode)
+    except Exception:
+        os.close(fd)
+        raise
+
 
 class ReleaseDB(object):
     """
@@ -1652,7 +1663,7 @@ def AddPackage(pkg, db = None,
                 # the updates for those, if any.  Create delta packages as
                 # necessary?
                 with open(pkg_file, "rb") as src:
-                    with open(pkg_dest_file, "wxb") as dst:
+                    with OpenWithMode(pkg_dest_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, "wb") as dst:
                         kBufSize = 1024 * 1024
                         while True:
                             buffer = src.read(kBufSize)
@@ -2095,7 +2106,7 @@ def ProcessRelease(source, archive,
             print("Due to conflict, trying sequence %s" % name, file=sys.stderr)
         new_mani_path = "%s/%s/%s-%s" % (archive, manifest.Train(), project, name)
         try:
-            mani_file = open(new_mani_path, "wxb", 0o622)
+            mani_file = OpenWithMode(new_mani_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, "wb")
             break
         except (IOError, OSError) as e:
             import errno
@@ -2201,14 +2212,14 @@ def ProcessRelease(source, archive,
         except:
             print("Could not sign manifest, so removing file", file=sys.stderr)
             try:
-                os.remove(mani_file.name)
+                os.remove(new_mani_path)
                 mani_file.close()
             except:
                 pass
             return
 
     lock = LockArchive(archive, "Saving manifest file", wait = True)
-    manifest.StorePath(mani_file.name)
+    manifest.StorePath(new_mani_path)
     mani_file.close()
     lock.close()
     lock = LockArchive(archive, "Creating LATEST symlink", wait = True)
@@ -2229,7 +2240,7 @@ def ProcessRelease(source, archive,
         if change_input:
             lock = LockArchive(archive, "Modifying ChangeLog", wait = True)
             try:
-                cfile = open(changefile, "ab", 0o664)
+                cfile = OpenWithMode(changefile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o664, "ab")
             except:
                 print("Unable to open changelog %s" % changefile, file=sys.stderr)
             else:
@@ -2317,7 +2328,7 @@ def Check(archive, db, project = "FreeNAS", args = []):
         if entry == ".lock":
             # This is the archive lock file
             continue
-        if entry == "trains.txt":
+        if entry in ("trains.txt", "trains_redir.json"):
             continue
         if entry == Manifest.VALIDATION_DIR:
             # We don't need to check this
@@ -2617,7 +2628,7 @@ def Rebuild(archive, dbfile, project = "FreeNAS", key = None, args = []):
         if left < right: return -1
         if left > right: return 1
         return 0
-    sorted_manifests = sorted(found_manifests, cmp = my_sort)
+    sorted_manifests = sorted(found_manifests, key = functools.cmp_to_key(my_sort))
 
     for manifest in sorted_manifests:
         # Process them somehow
@@ -2681,7 +2692,7 @@ def Rebuild(archive, dbfile, project = "FreeNAS", key = None, args = []):
                 manifest_path = os.path.join(copy, m.Train(), "%s-%s" % (project, name))
                 print("%s" % manifest_path, file=sys.stderr)
                 try:
-                    manifest_file = open(manifest_path, "wxb", 0o664)
+                    manifest_file = OpenWithMode(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o664, "wb")
                 except OSError as e:
                     # Should compare manifests, perhaps
                     print("Cannot open %s: %s" % (manifest_path, str(e)), file=sys.stderr)
@@ -2955,7 +2966,7 @@ def RemoveRelease(archive, db, project, sequence, dbonly = False, shlist = None)
         # (We can't remove the db entry for the package if there are
         # any updates that reference it, because we want it to show up
         # for delta package creation.)
-	packages_dir = os.path.join(archive, "Packages")
+        packages_dir = os.path.join(archive, "Packages")
         updates = db.UpdatesForPackage(pkg, count = 0)
         if updates:
             # We're going to delete the delta package files
@@ -3694,7 +3705,6 @@ def main():
         Dump(archive, db, args = args)
     elif cmd == "rollback":
         Rollback(archive, db, project = project_name, args = args)
-        db.close()
     elif cmd == "prune":
         Prune(archive, db, project = project_name, args = args)
     elif cmd == "delete":
@@ -3706,6 +3716,9 @@ def main():
     else:
         print("Unknown command %s" % cmd, file=sys.stderr)
         usage()
+
+    if db is not None:
+        db.close()
 
 if __name__ == "__main__":
     main()
