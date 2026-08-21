@@ -359,6 +359,6 @@ def DiffPackageFiles(pkg1, pkg2, output_file=None, scripts=None, force_output=Fa
             search_dict.pop(fname)
             if len(search_dict) == 0:
                 break
-        member = next(pkg2_tarfile)
+        member = pkg2_tarfile.next()
     new_tf.close()
     return output_file
